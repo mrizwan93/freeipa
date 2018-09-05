@@ -486,3 +486,55 @@ class TestInstallMasterReservedIPasForwarder(IntegrationTest):
         exp_str = ("Invalid IP Address 0.0.0.0: cannot use IANA reserved "
                    "IP address 0.0.0.0")
         assert exp_str in cmd.stdout_text
+
+
+class TestInstallReplicaAgainstSpecificServer(IntegrationTest):
+    """Installation of replica against a specific server
+
+    Test to check replica install against specific server. It uses master and
+    replica1 without CA and having custodia service stopped. Then try to
+    install replica2 from replica1 so that replica2 will fetch secrets from
+    master as custodia service is not running on replica1.
+
+    related ticket: https://pagure.io/freeipa/issue/7566
+    """
+
+    num_replicas = 2
+
+    def test_replica_install_against_server(self):
+        tasks.install_master(self.master)
+
+        # install replica1 without CA
+        tasks.install_replica(self.master, self.replicas[0], setup_ca=False)
+
+        # stop custodia service on replica1
+        self.replicas[0].run_command('systemctl stop ipa-custodia.service')
+
+        # check if custodia service is stopped
+        cmd = self.replicas[0].run_command('ipactl status')
+        assert 'ipa-custodia Service: STOPPED' in cmd.stdout_text
+
+        replica1_ip = self.replicas[0].ip
+        replica2_ip = self.replicas[1].ip
+
+        # start firewalld
+        self.master.run_command(['dnf', 'install', '-y', 'firewalld'])
+        self.master.run_command(['systemctl', 'start', 'firewalld'])
+
+        # allow access from replica1 on master
+        rich_rule = ("rule family='ipv4' source"
+                     "address='{}' accept").format(replica1_ip)
+        self.master.run_command(['firewall-cmd', '--permanent',
+                                 '--add-rich-rule={}'.format(rich_rule)])
+
+        # deny access from replica2 on master
+        rich_rule = ("rule family='ipv4' source"
+                     "address='{}' reject").format(replica2_ip)
+        self.master.run_command(['firewall-cmd', '--permanent',
+                                 '--add-rich-rule={}'.format(rich_rule)])
+        # reoload firewall
+        self.master.run_command(['firewall-cmd', '--reload'])
+
+        # install replica2 against replica1, as custodia service is stopped
+        # on replica1, replica2 will fetch secrets from master
+        tasks.install_replica(self.replicas[0], self.replicas[1])
