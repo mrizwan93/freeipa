@@ -211,6 +211,10 @@ class test_user(user_tasks):
         self.reset_password_action(pwd)
         self.assert_text_field('has_password', '******')
 
+        # check if unlock option is not enabled
+        self.assert_action_list_action('unlock', enabled=False,
+                                       facet_actions=False)
+
         self.action_list_action('unlock')
 
         # delete
