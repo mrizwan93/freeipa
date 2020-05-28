@@ -102,7 +102,9 @@ dist_app_DATA =				\
 	ipaca_customize.ini		\
 	ipaca_softhsm2.ini		\
 	sshd_ipa.conf.template	\
+	pki-acme-configsources.conf.template	\
 	pki-acme-database.conf.template	\
+	pki-acme-engine.conf.template	\
 	pki-acme-issuer.conf.template	\
 	$(NULL)
 
