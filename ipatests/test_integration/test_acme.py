@@ -17,11 +17,11 @@ from ipaplatform.osinfo import osinfo
 # RHEL does not have certbot.  EPEL's version is broken with
 # python-cryptography-2.3; likewise recent PyPI releases.
 # So for now, on RHEL we suppress tests that use certbot.
-skip_certbot_tests = osinfo.id not in ['fedora',]
+skip_certbot_tests = osinfo.id not in ['fedora', ]
 
 # Fedora mod_md package needs some patches before it will work.
 # RHEL version has the patches.
-skip_mod_md_tests = osinfo.id not in ['rhel','fedora',]
+skip_mod_md_tests = osinfo.id not in ['rhel', 'fedora', ]
 
 CERTBOT_DNS_IPA_SCRIPT = '/usr/libexec/ipa/acme/certbot-dns-ipa'
 
@@ -51,7 +51,7 @@ class TestACME(IntegrationTest):
 
     """
     num_replicas = 0
-    num_clients = 1
+    num_clients = 2
 
     @classmethod
     def install(cls, mh):
@@ -68,8 +68,12 @@ class TestACME(IntegrationTest):
         tasks.install_master(cls.master, setup_dns=True)
 
         tasks.install_client(cls.master, cls.clients[0])
+        tasks.install_client(cls.master, cls.clients[1])
         tasks.config_host_resolvconf_with_master_data(
             cls.master, cls.clients[0]
+        )
+        tasks.config_host_resolvconf_with_master_data(
+            cls.master, cls.clients[1]
         )
 
     #######
@@ -139,6 +143,21 @@ class TestACME(IntegrationTest):
                 '--server', self.acme_server,
                 'certonly',
                 '--domain', self.clients[0].hostname,
+                '--standalone',
+            ],
+        )
+
+    @pytest.mark.skipif(skip_certbot_tests, reason='certbot not available')
+    def test_certbot_certonly_multidomain(self):
+        # Get a cert from ACME service for multiple domain using HTTP challenge
+        # and Certbot's standalone HTTP server mode
+        self.clients[0].run_command(
+            [
+                'certbot',
+                '--server', self.acme_server,
+                'certonly',
+                '--domain', self.clients[0].hostname,
+                self.clients[1].hostname,
                 '--standalone',
             ],
         )
