@@ -6,15 +6,15 @@
 Module provides tests for ipa-cert-fix CLI.
 """
 import pytest
-import re
 import time
 
 import logging
 from ipaplatform.paths import paths
+from ipapython.ipaldap import realm_to_serverid
 from ipatests.pytest_ipa.integration import tasks
 from ipatests.test_integration.base import IntegrationTest
 from ipatests.test_integration.test_caless import CALessBase, ipa_certs_cleanup
-
+from ipatests.test_integration.test_cert import get_certmonger_fs_id
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +336,19 @@ class TestCertFixReplica(IntegrationTest):
             setup_dns=False, extra_args=['--no-ntp']
         )
 
-    def test_renew_expired_cert_replica(self):
+    @pytest.fixture
+    def move_date_check_replication(self):
+        # move system date to expire certs
+        for host in self.master, self.replicas[0]:
+            move_date(host, 'stop', '+3years+1days')
+
+        yield
+
+        # move date back on replica and master
+        for host in self.master, self.replicas[0]:
+            move_date(host, 'start', '-3years-1days')
+
+    def test_renew_expired_cert_replica(self, move_date_check_replication):
         """Test renewal of certificates on replica with ipa-cert-fix
 
         This is to check that ipa-cert-fix renews the certificates
@@ -344,8 +356,6 @@ class TestCertFixReplica(IntegrationTest):
 
         related: https://pagure.io/freeipa/issue/7885
         """
-        move_date(self.master, 'stop', '+3years+1days')
-
         # wait for cert expiry
         check_status(self.master, 8, "CA_UNREACHABLE")
 
@@ -353,35 +363,61 @@ class TestCertFixReplica(IntegrationTest):
 
         check_status(self.master, 9, "MONITORING")
 
-        # move system date to expire cert on replica
-        move_date(self.replicas[0], 'stop', '+3years+1days')
+        # replica operations
+        # 'Server-Cert cert-pki-ca' cert will be in CA_UNREACHABLE state
+        cmd = self.replicas[0].run_command(
+            ['getcert', 'list',
+             '-d', paths.PKI_TOMCAT_ALIAS_DIR,
+             '-n', 'Server-Cert cert-pki-ca']
+        )
+        req_id = get_certmonger_fs_id(cmd.stdout_text)
+        tasks.wait_for_certmonger_status(
+            self.replicas[0], ('CA_UNREACHABLE'), req_id, timeout=600
+        )
 
-        # RA agent cert will be expired and in CA_UNREACHABLE state
-        check_status(self.replicas[0], 1, "CA_UNREACHABLE")
+        # check that HTTP,LDAP,PKINIT are renewed and in MONITORING state
+        instance = realm_to_serverid(self.master.domain.realm)
+        dirsrv_cert = paths.ETC_DIRSRV_SLAPD_INSTANCE_TEMPLATE % instance
+        for cert in (paths.KDC_CERT, paths.HTTPD_CERT_FILE):
+            cmd = self.replicas[0].run_command(
+                ['getcert', 'list', '-f', cert]
+            )
+            req_id = get_certmonger_fs_id(cmd.stdout_text)
+            tasks.wait_for_certmonger_status(
+                self.replicas[0], ('MONITORING'), req_id, timeout=600
+            )
+
+        cmd = self.replicas[0].run_command(
+            ['getcert', 'list', '-d', dirsrv_cert]
+        )
+        req_id = get_certmonger_fs_id(cmd.stdout_text)
+        tasks.wait_for_certmonger_status(
+            self.replicas[0], ('MONITORING'), req_id, timeout=600
+        )
 
         # renew RA agent cert
         self.replicas[0].run_command(
             ['ipa-cert-fix', '-v'], stdin_text='yes\n'
         )
 
-        # LDAP/HTTP/PKINIT certs will be renewed automaticaly
-        # after moving date on replica. This 3, 1 CA cert,
-        # 1 RA agent cert. Check for total 5 valid certs.
-        check_status(self.replicas[0], 5, "MONITORING")
+        cmd = self.replicas[0].run_command(
+            ['getcert', 'list',
+             '-d', paths.PKI_TOMCAT_ALIAS_DIR,
+             '-n', 'Server-Cert cert-pki-ca'])
+        req_id = get_certmonger_fs_id(cmd.stdout_text)
+        tasks.wait_for_certmonger_status(
+            self.replicas[0], ('MONITORING'), req_id, timeout=600
+        )
 
-        # get the req ids of all certs to renew remaining
-        # certs by re-submitting it
-        result = self.replicas[0].run_command(['getcert', 'list'])
-        req_ids = re.findall(r'\d{14}', result.stdout_text)
+        check_status(self.replicas[0], 9, "MONITORING")
 
-        # resubmit the certs to renew them
-        for req_id in req_ids:
-            self.replicas[0].run_command(
-                ['getcert', 'resubmit', '-i', req_id]
-            )
-
-        check_status(self.master, 9, "MONITORING")
-
-        # move date back on replica and master
-        move_date(self.replicas[0], 'start', '-3years-1days')
-        move_date(self.master, 'start', '-3years-1days')
+        # check if replication works
+        testuser = 'testuser1'
+        password = 'Secret@123'
+        stdin = (f"{self.master.config.admin_password}\n"
+                 f"{self.master.config.admin_password}\n"
+                 f"{self.master.config.admin_password}\n")
+        self.master.run_command(['kinit', 'admin'], stdin_text=stdin)
+        tasks.user_add(self.master, testuser, password=password)
+        self.replicas[0].run_command(['kinit', 'admin'], stdin_text=stdin)
+        self.replicas[0].run_command(['ipa', 'user-show', testuser])
