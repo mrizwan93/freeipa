@@ -19,7 +19,6 @@ from ipatests.test_integration.test_acme import (
     get_selinux_status,
     skip_certbot_tests,
     skip_mod_md_tests,
-
 )
 from ipatests.test_integration.test_caless import CALessBase
 from ipatests.test_integration.test_cert import get_certmonger_fs_id
@@ -34,17 +33,32 @@ from ipatests.test_integration.test_ipa_cert_fix import (
     needs_resubmit,
     get_cert_expiry
 )
-from ipatests.test_integration.test_ipahealthcheck import run_healthcheck
+from ipatests.test_integration.test_ipahealthcheck import (
+    run_healthcheck,
+    set_excludes
+)
 from ipatests.pytest_ipa.integration import tasks
+from ipatests.pytest_ipa.integration.env_config import get_global_config
 from ipalib import x509 as ipa_x509
 from ipaplatform.paths import paths
 
 
-hsm_lib_path = '/usr/lib64/pkcs11/libsofthsm2.so'
+config = get_global_config()
+hsm_lib_path = ''
+if config.token_library:
+    hsm_lib_path = config.token_library
+else:
+    hsm_lib_path = '/usr/lib64/pkcs11/libsofthsm2.so'
 
 
-def create_hsm_token(host):
-    """Helper method to create an hsm token using softhsm"""
+def get_hsm_token(host):
+    """Helper method to get an hsm token
+    This method creates a softhsm token if the hsm hardware
+    token is not found.
+    """
+    if host.config.token_name:
+        return (host.config.token_name, host.config.token_password)
+
     token_name = ''.join(
         random.choice(string.ascii_letters) for i in range(10)
     )
@@ -62,6 +76,19 @@ def create_hsm_token(host):
          '--label', token_name]
     )
     return (token_name, token_passwd)
+
+
+def delete_hsm_token(hosts, token_name):
+    for host in hosts:
+        if host.config.token_name:
+            # assumption: for time being /root/cleantoken.sh is copied
+            # host manually. This should be removed in final iteration.
+            host.run_command(['sh', '/root/cleantoken.sh'])
+        else:
+            host.run_command(
+                ['softhsm2-util', '--delete-token', '--token', token_name],
+                raiseonerr=False
+            )
 
 
 def find_softhsm_token_files(host, token):
@@ -108,8 +135,24 @@ def find_softhsm_token_files(host, token):
     ]
 
 
+def copy_token_files(src_host, dest_host, token_name):
+    """Helper method to copy the token files to replica"""
+    # copy the token files to replicas
+    if not src_host.config.token_name:
+        serialdir, token_files = find_softhsm_token_files(
+            src_host, token_name
+        )
+        if serialdir:
+            for host in dest_host:
+                tasks.copy_files(src_host, host, token_files)
+                host.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
+                host.run_command(
+                    ['chown', '-R', 'pkiuser:pkiuser', serialdir]
+                )
+
+
 def check_version(host):
-    if tasks.get_pki_version(host) < tasks.parse_version('11.3.0'):
+    if tasks.get_pki_version(host) < tasks.parse_version('11.5.0'):
         raise pytest.skip("PKI HSM support is not available")
 
 
@@ -125,7 +168,7 @@ class TestHSMInstall(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
         tasks.install_master(
@@ -137,52 +180,55 @@ class TestHSMInstall(IntegrationTest):
             )
         )
         # copy the token files to replicas
-        serialdir, token_files = find_softhsm_token_files(
-            cls.master, token_name
-        )
-        if serialdir:
+        if (
+            cls.master.config.token_library
+            and 'nfast' in cls.master.config.token_library
+        ):
             for replica in cls.replicas:
-                tasks.copy_files(cls.master, replica, token_files)
-                replica.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
-                replica.run_command(
-                    ['chown', '-R', 'pkiuser:pkiuser', serialdir]
-                )
+                tasks.copy_nfast_data(cls.master, replica)
+        copy_token_files(cls.master, cls.replicas, token_name)
 
     @classmethod
     def uninstall(cls, mh):
         check_version(cls.master)
         super(TestHSMInstall, cls).uninstall(mh)
-        for host in [cls.master] + cls.replicas:
-            host.run_command(
-                ['softhsm2-util', '--delete-token', '--token', cls.token_name],
-                raiseonerr=False
-            )
+        delete_hsm_token([cls.master] + cls.replicas, cls.token_name)
 
     def test_hsm_install_replica0_ca_less_install(self):
         check_version(self.master)
         tasks.install_replica(
             self.master, self.replicas[0], setup_ca=False,
             setup_dns=True,
-            token_password=self.token_password)
+            extra_args=('--token-password', self.token_password,)
+        )
 
     def test_hsm_install_replica0_ipa_ca_install(self):
         check_version(self.master)
-        tasks.install_ca(self.replicas[0], token_password=self.token_password)
+        tasks.install_ca(
+            self.replicas[0],
+            extra_args=('--token-password', self.token_password,),
+        )
 
     def test_hsm_install_replica0_ipa_kra_install(self):
         check_version(self.master)
-        tasks.install_kra(self.replicas[0], first_instance=True,
-                          token_password=self.token_password)
+        tasks.install_kra(
+            self.replicas[0], first_instance=True,
+            extra_args=('--token-password', self.token_password,)
+        )
 
         # Copy the new KRA key material to the other servers.
-        serialdir, token_files = find_softhsm_token_files(
-            self.replicas[0], self.token_name
+        if (
+            self.master.config.token_library
+            and 'nfast' in self.master.config.token_library
+        ):
+            for dest_host in self.replicas[1], self.replicas[2]:
+                tasks.copy_nfast_data(self.replicas[0], dest_host)
+
+        copy_token_files(
+            self.replicas[0],
+            [self.replicas[1], self.replicas[2], self.master],
+            self.token_name
         )
-        for server in (self.replicas[1], self.replicas[2], self.master):
-            tasks.copy_files(self.replicas[0], server, token_files)
-            server.run_command(
-                ['chown', '-R', 'pkiuser:pkiuser', serialdir]
-            )
 
     def test_hsm_install_replica0_ipa_dns_install(self):
         tasks.install_dns(self.replicas[0])
@@ -191,13 +237,14 @@ class TestHSMInstall(IntegrationTest):
         check_version(self.master)
         tasks.install_replica(
             self.master, self.replicas[1], setup_ca=True,
-            token_password=self.token_password)
+            extra_args=('--token-password', self.token_password,)
+        )
 
     def test_hsm_install_replica1_ipa_kra_install(self):
         check_version(self.master)
         tasks.install_kra(
             self.replicas[1],
-            token_password=self.token_password
+            extra_args=('--token-password', self.token_password,)
         )
 
     def test_hsm_install_replica1_ipa_dns_install(self):
@@ -208,7 +255,16 @@ class TestHSMInstall(IntegrationTest):
         check_version(self.master)
         tasks.install_replica(
             self.master, self.replicas[2], setup_ca=True, setup_kra=True,
-            setup_dns=True, token_password=self.token_password)
+            setup_dns=True,
+            extra_args=('--token-password', self.token_password,)
+        )
+
+    def test_hsm_install_master_ipa_kra_install(self):
+        check_version(self.master)
+        tasks.install_kra(
+            self.master,
+            extra_args=('--token-password', self.token_password,)
+        )
 
     def test_hsm_install_client(self):
         check_version(self.master)
@@ -234,6 +290,7 @@ class TestHSMInstall(IntegrationTest):
 
     def test_hsm_install_healthcheck(self):
         check_version(self.master)
+        set_excludes(self.master, "key", "DSCLE0004")
         tasks.install_packages(self.master, ['*ipa-healthcheck'])
         returncode, output = run_healthcheck(
             self.master, output_type="human", failures_only=True
@@ -256,7 +313,7 @@ class TestHSMInstallADTrustBase(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
         tasks.install_master(
@@ -268,26 +325,20 @@ class TestHSMInstallADTrustBase(IntegrationTest):
                 '--token-password', token_passwd
             )
         )
-        serialdir, token_files = find_softhsm_token_files(
-            cls.master, token_name
-        )
-        if serialdir:
+        # copy token files to replicas
+        if (
+            cls.master.config.token_library
+            and 'nfast' in cls.master.config.token_library
+        ):
             for replica in cls.replicas:
-                tasks.copy_files(cls.master, replica, token_files)
-                replica.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
-                replica.run_command(
-                    ['chown', '-R', 'pkiuser:pkiuser', serialdir]
-                )
+                tasks.copy_nfast_data(cls.master, replica)
+        copy_token_files(cls.master, cls.replicas, token_name)
 
     @classmethod
     def uninstall(cls, mh):
         check_version(cls.master)
         super(TestHSMInstallADTrustBase, cls).uninstall(mh)
-        for host in [cls.master] + cls.replicas:
-            host.run_command(
-                ['softhsm2-util', '--delete-token', '--token', cls.token_name],
-                raiseonerr=False
-            )
+        delete_hsm_token([cls.master] + cls.replicas, cls.token_name)
 
     def test_hsm_adtrust_replica0_all_components(self):
         check_version(self.master)
@@ -295,7 +346,8 @@ class TestHSMInstallADTrustBase(IntegrationTest):
             self.master, self.replicas[0], setup_ca=True,
             setup_adtrust=True, setup_kra=True, setup_dns=True,
             nameservers='master' if self.master_with_dns else None,
-            token_password=self.token_password)
+            extra_args=('--token-password', self.token_password,)
+        )
 
 
 class TestADTrustInstallWithDNS_KRA_ADTrust(IntegrationTest):
@@ -309,7 +361,7 @@ class TestADTrustInstallWithDNS_KRA_ADTrust(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
         tasks.install_master(
@@ -321,33 +373,26 @@ class TestADTrustInstallWithDNS_KRA_ADTrust(IntegrationTest):
                 '--token-password', token_passwd
             )
         )
-        serialdir, token_files = find_softhsm_token_files(
-            cls.master, token_name
-        )
 
-        if serialdir:
+        if (
+            cls.master.config.token_library
+            and 'nfast' in cls.master.config.token_library
+        ):
             for replica in cls.replicas:
-                tasks.copy_files(cls.master, replica, token_files)
-                replica.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
-                replica.run_command(
-                    ['chown', '-R', 'pkiuser:pkiuser', serialdir]
-                )
+                tasks.copy_nfast_data(cls.master, replica)
+        copy_token_files(cls.master, cls.replicas, token_name)
 
     @classmethod
     def uninstall(cls, mh):
         check_version(cls.master)
         super(TestADTrustInstallWithDNS_KRA_ADTrust, cls).uninstall(mh)
-        for host in [cls.master] + cls.replicas:
-            host.run_command(
-                ['softhsm2-util', '--delete-token', '--token', cls.token_name],
-                raiseonerr=False
-            )
+        delete_hsm_token([cls.master] + cls.replicas, cls.token_name)
 
     def test_hsm_adtrust_replica0(self):
         check_version(self.master)
         tasks.install_replica(
             self.master, self.replicas[0], setup_ca=True, setup_kra=True,
-            token_password=self.token_password
+            extra_args=('--token-password', self.token_password,)
         )
 
 
@@ -359,7 +404,7 @@ class TestHSMcertRenewal(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
         tasks.install_master(
@@ -375,11 +420,7 @@ class TestHSMcertRenewal(IntegrationTest):
     def uninstall(cls, mh):
         check_version(cls.master)
         super(TestHSMcertRenewal, cls).uninstall(mh)
-        for host in [cls.master] + cls.replicas:
-            host.run_command(
-                ['softhsm2-util', '--delete-token', '--token', cls.token_name],
-                raiseonerr=False
-            )
+        delete_hsm_token([cls.master], cls.token_name)
 
     def test_certs_renewal(self):
         """
@@ -438,7 +479,7 @@ class TestHSMCALessToExternalToSelfSignedCA(CALessBase):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
 
@@ -446,11 +487,7 @@ class TestHSMCALessToExternalToSelfSignedCA(CALessBase):
     def uninstall(cls, mh):
         check_version(cls.master)
         super(TestHSMCALessToExternalToSelfSignedCA, cls).uninstall(mh)
-        for host in [cls.master] + cls.replicas:
-            host.run_command(
-                ['softhsm2-util', '--delete-token', '--token', cls.token_name],
-                raiseonerr=False
-            )
+        delete_hsm_token([cls.master] + cls.replicas, cls.token_name)
 
     def test_hsm_caless_server(self):
         """Install CA-less master"""
@@ -468,28 +505,27 @@ class TestHSMCALessToExternalToSelfSignedCA(CALessBase):
         assert master.returncode == 0
 
         # copy the token files to replicas
-        serialdir, token_files = find_softhsm_token_files(
-            self.master, self.token_name
-        )
-
-        if serialdir:
+        if (
+            self.master.config.token_library
+            and 'nfast' in self.master.config.token_library
+        ):
             for replica in self.replicas:
-                tasks.copy_files(self.master, replica, token_files)
-                replica.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
-                replica.run_command(
-                    ['chown', '-R', 'pkiuser:pkiuser', serialdir]
-                )
+                tasks.copy_nfast_data(self.master, replica)
+        copy_token_files(self.master, self.replicas, self.token_name)
 
     def test_hsm_caless_to_ca_full(self):
         check_version(self.master)
-        tasks.install_ca(self.master, token_password=self.token_password)
+        tasks.install_ca(
+            self.master,
+            extra_args=('--token-password', self.token_password,),
+        )
 
         ca_show = self.master.run_command(['ipa', 'ca-show', 'ipa'])
         assert 'Subject DN: CN=Certificate Authority,O={}'.format(
             self.master.domain.realm) in ca_show.stdout_text
 
-    def test_hsm_caless_to_external_ca_install(self):
-        """Install external CA on master"""
+    def test_hsm_caless_selfsigned_to_external_ca_install(self):
+        # Install external CA on master
         result = self.master.run_command([paths.IPA_CACERT_MANAGE, 'renew',
                                          '--external-ca'])
         assert result.returncode == 0
@@ -529,7 +565,8 @@ class TestHSMCALessToExternalToSelfSignedCA(CALessBase):
         check_version(self.master)
         tasks.install_replica(
             self.master, self.replicas[0], setup_ca=True,
-            token_password=self.token_password)
+            extra_args=('--token-password', self.token_password,)
+        )
 
 
 IPA_CA = "ipa_ca.crt"
@@ -549,7 +586,7 @@ class TestHSMExternalToSelfSignedCA(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
 
@@ -557,11 +594,7 @@ class TestHSMExternalToSelfSignedCA(IntegrationTest):
     def uninstall(cls, mh):
         check_version(cls.master)
         super(TestHSMExternalToSelfSignedCA, cls).uninstall(mh)
-        for host in [cls.master] + cls.replicas:
-            host.run_command(
-                ['softhsm2-util', '--delete-token', '--token', cls.token_name],
-                raiseonerr=False
-            )
+        delete_hsm_token([cls.master] + cls.replicas, cls.token_name)
 
     def test_hsm_external_ca_install(self):
         check_version(self.master)
@@ -593,32 +626,29 @@ class TestHSMExternalToSelfSignedCA(IntegrationTest):
         assert result.returncode == 0
 
         # copy token files to replicas
-        serialdir, token_files = find_softhsm_token_files(
-            self.master, self.token_name
-        )
-
-        if serialdir:
+        if (
+            self.master.config.token_library
+            and 'nfast' in self.master.config.token_library
+        ):
             for replica in self.replicas:
-                tasks.copy_files(self.master, replica, token_files)
-                replica.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
-                replica.run_command(
-                    ['chown', '-R', 'pkiuser:pkiuser', serialdir]
-                )
+                tasks.copy_nfast_data(self.master, replica)
+        copy_token_files(self.master, self.replicas, self.token_name)
 
     def test_hsm_external_kra_install(self):
         check_version(self.master)
-        tasks.install_kra(self.master, first_instance=True,
-                          token_password=self.token_password)
+        tasks.install_kra(
+            self.master, first_instance=True,
+            extra_args=('--token-password', self.token_password,)
+        )
 
         # Copy the new KRA key material to the other server(s).
-        serialdir, token_files = find_softhsm_token_files(
-            self.master, self.token_name
-        )
-        for server in (self.replicas[0],):
-            tasks.copy_files(self.master, server, token_files)
-            server.run_command(
-                ['chown', '-R', 'pkiuser:pkiuser', serialdir]
-            )
+        if (
+            self.master.config.token_library
+            and 'nfast' in self.master.config.token_library
+        ):
+            for replica in self.replicas:
+                tasks.copy_nfast_data(self.master, replica)
+        copy_token_files(self.master, self.replicas, self.token_name)
 
     def test_hsm_external_to_self_signed_ca(self):
         check_version(self.master)
@@ -630,7 +660,8 @@ class TestHSMExternalToSelfSignedCA(IntegrationTest):
         check_version(self.master)
         tasks.install_replica(
             self.master, self.replicas[0], setup_kra=True,
-            token_password=self.token_password)
+            extra_args=('--token-password', self.token_password,)
+        )
 
 
 @pytest.fixture
@@ -646,6 +677,9 @@ def expire_cert_critical():
         hosts['host'] = host
         # move date to expire certs
         tasks.move_date(host, 'stop', '+3Years+1day')
+        host.run_command(
+            ['ipactl', 'restart', '--ignore-service-failures']
+        )
 
     yield _expire_cert_critical
 
@@ -672,7 +706,7 @@ class TestHSMcertFix(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
         tasks.install_master(
@@ -689,11 +723,7 @@ class TestHSMcertFix(IntegrationTest):
     def uninstall(cls, mh):
         check_version(cls.master)
         super(TestHSMcertFix, cls).uninstall(mh)
-        for host in [cls.master] + cls.replicas:
-            host.run_command(
-                ['softhsm2-util', '--delete-token', '--token', cls.token_name],
-                raiseonerr=False
-            )
+        delete_hsm_token([cls.master], cls.token_name)
 
     def test_hsm_renew_expired_cert_on_master(self, expire_cert_critical):
         check_version(self.master)
@@ -704,7 +734,7 @@ class TestHSMcertFix(IntegrationTest):
 
         self.master.run_command(['ipa-cert-fix', '-v'], stdin_text='yes\n')
 
-        check_status(self.master, 9, "MONITORING")
+        check_status(self.master, 9, "MONITORING", timeout=1000)
 
         # second iteration of ipa-cert-fix
         result = self.master.run_command(
@@ -725,7 +755,7 @@ class TestHSMcertFixKRA(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
         tasks.install_master(
@@ -743,11 +773,7 @@ class TestHSMcertFixKRA(IntegrationTest):
     def uninstall(cls, mh):
         check_version(cls.master)
         super(TestHSMcertFixKRA, cls).uninstall(mh)
-        for host in [cls.master] + cls.replicas:
-            host.run_command(
-                ['softhsm2-util', '--delete-token', '--token', cls.token_name],
-                raiseonerr=False
-            )
+        delete_hsm_token([cls.master], cls.token_name)
 
     def test_hsm_renew_expired_cert_with_kra(self, expire_cert_critical):
         check_version(self.master)
@@ -757,6 +783,7 @@ class TestHSMcertFixKRA(IntegrationTest):
         check_status(self.master, 11, "CA_UNREACHABLE")
 
         self.master.run_command(['ipa-cert-fix', '-v'], stdin_text='yes\n')
+        self.master.run_command(['systemctl', 'restart', 'certmonger'])
 
         check_status(self.master, 12, "MONITORING")
 
@@ -772,7 +799,7 @@ class TestHSMcertFixReplica(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
         tasks.install_master(
@@ -785,39 +812,34 @@ class TestHSMcertFixReplica(IntegrationTest):
             )
         )
         # copy the token files to replicas
-        serialdir, token_files = find_softhsm_token_files(
-            cls.master, token_name
-        )
-
-        if serialdir:
+        if (
+            cls.master.config.token_library
+            and 'nfast' in cls.master.config.token_library
+        ):
             for replica in cls.replicas:
-                tasks.copy_files(cls.master, replica, token_files)
-                replica.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
-                replica.run_command(
-                    ['chown', '-R', 'pkiuser:pkiuser', serialdir]
-                )
+                tasks.copy_nfast_data(cls.master, replica)
+        copy_token_files(cls.master, cls.replicas, token_name)
 
         tasks.install_replica(
-            cls.master, cls.replicas[0], setup_ca=False,
+            cls.master, cls.replicas[0], setup_ca=True,
             nameservers='master' if cls.master_with_dns else None,
-            token_password=token_passwd
+            extra_args=('--token-password', token_passwd,)
         )
 
     @classmethod
     def uninstall(cls, mh):
         check_version(cls.master)
         super(TestHSMcertFixReplica, cls).uninstall(mh)
-        for host in [cls.master] + cls.replicas:
-            host.run_command(
-                ['softhsm2-util', '--delete-token', '--token', cls.token_name],
-                raiseonerr=False
-            )
+        delete_hsm_token([cls.master] + cls.replicas, cls.token_name)
 
     @pytest.fixture
     def expire_certs(self):
         # move system date to expire certs
         for host in self.master, self.replicas[0]:
             tasks.move_date(host, 'stop', '+3years+1days')
+            host.run_command(
+                ['ipactl', 'restart', '--ignore-service-failures']
+            )
 
         yield
 
@@ -829,6 +851,7 @@ class TestHSMcertFixReplica(IntegrationTest):
     def test_hsm_renew_expired_cert_replica(self, expire_certs):
         check_version(self.master)
         # wait for cert expiry
+        self.master.run_command(['systemctl', 'restart', 'certmonger'])
         check_status(self.master, 8, "CA_UNREACHABLE")
 
         self.master.run_command(['ipa-cert-fix', '-v'], stdin_text='yes\n')
@@ -939,7 +962,7 @@ class TestHSMNegative(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
 
@@ -983,7 +1006,7 @@ class TestHSMNegative(IntegrationTest):
 
     def test_hsm_negative_special_char_token_name(self):
         check_version(self.master)
-        token_name = 'hsm token'
+        token_name = 'hsm:token'
         token_passwd = 'Secret123'
         self.master.run_command(
             ['softhsm2-util', '--delete-token', '--token', token_name],
@@ -1023,7 +1046,7 @@ class TestHSMACME(CALessBase):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
         tasks.install_master(
@@ -1036,6 +1059,12 @@ class TestHSMACME(CALessBase):
         )
 
         tasks.install_client(cls.master, cls.clients[0])
+
+    @classmethod
+    def uninstall(cls, mh):
+        check_version(cls.master)
+        super(TestHSMACME, cls).uninstall(mh)
+        delete_hsm_token([cls.master], cls.token_name)
 
     @pytest.mark.skipif(skip_certbot_tests, reason='certbot not available')
     def test_certbot_certonly_standalone(self):
@@ -1106,7 +1135,7 @@ class TestHSMBackupRestore(IntegrationTest):
         # Enable pkiuser to read softhsm tokens
         cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
 
-        token_name, token_passwd = create_hsm_token(cls.master)
+        token_name, token_passwd = get_hsm_token(cls.master)
         cls.token_password = token_passwd
         cls.token_name = token_name
         tasks.install_master(
@@ -1117,6 +1146,12 @@ class TestHSMBackupRestore(IntegrationTest):
                 '--token-password', token_passwd
             )
         )
+
+    @classmethod
+    def uninstall(cls, mh):
+        check_version(cls.master)
+        super(TestHSMBackupRestore, cls).uninstall(mh)
+        delete_hsm_token([cls.master], cls.token_name)
 
     def test_hsm_backup_restore(self):
         check_version(self.master)
@@ -1134,3 +1169,254 @@ class TestHSMBackupRestore(IntegrationTest):
             ['ipa-restore', backup_path],
             stdin_text=f'{self.master.config.dirman_password}\nyes'
         )
+
+
+@pytest.fixture
+def issue_and_expire_acme_cert():
+    """Fixture to expire cert by moving date past expiry of acme cert"""
+    hosts = []
+
+    def _issue_and_expire_acme_cert(
+        master, client,
+        acme_server_url, no_of_cert=1
+    ):
+
+        hosts.append(master)
+        hosts.append(client)
+
+        # enable the ACME service on master
+        master.run_command(['ipa-acme-manage', 'enable'])
+
+        # register the account with certbot
+        certbot_register(client, acme_server_url)
+
+        # request a standalone acme cert
+        certbot_standalone_cert(client, acme_server_url, no_of_cert)
+
+        # move system date to expire acme cert
+        for host in hosts:
+            tasks.kdestroy_all(host)
+            tasks.move_date(host, 'stop', '+90days+2hours')
+
+        # restart ipa services as date moved and wait to get things settle
+        time.sleep(10)
+        master.run_command(['ipactl', 'restart'])
+        time.sleep(10)
+
+        tasks.get_kdcinfo(master)
+        # Note raiseonerr=False:
+        # the assert is located after kdcinfo retrieval.
+        # run kinit command repeatedly until sssd gets settle
+        # after date change
+        tasks.run_repeatedly(
+            master, "KRB5_TRACE=/dev/stdout kinit admin",
+            stdin_text='{0}\n{0}\n{0}\n'.format(
+                master.config.admin_password
+            )
+        )
+        # Retrieve kdc.$REALM after the password change, just in case SSSD
+        # domain status flipped to online during the password change.
+        tasks.get_kdcinfo(master)
+
+    yield _issue_and_expire_acme_cert
+
+    # move back date
+    for host in hosts:
+        tasks.move_date(host, 'start', '-90days-2hours')
+
+    # restart ipa services as date moved and wait to get things settle
+    # if the internal fixture was not called (for instance because the test
+    # was skipped), hosts = [] and hosts[0] would produce an IndexError
+    # exception.
+    if hosts:
+        time.sleep(10)
+        hosts[0].run_command(['ipactl', 'restart'])
+        time.sleep(10)
+
+
+class TestHSMACMEPrune(IntegrationTest):
+    """Validate that ipa-acme-manage configures dogtag for pruning"""
+
+    num_clients = 1
+
+    @classmethod
+    def install(cls, mh):
+        check_version(cls.master)
+        super(TestHSMACMEPrune, cls).install(mh)
+
+        # install packages before client install in case of IPA DNS problems
+        cls.acme_server = prepare_acme_client(cls.master, cls.clients[0])
+
+        # Enable pkiuser to read softhsm tokens
+        cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
+
+        token_name, token_passwd = get_hsm_token(cls.master)
+        cls.token_password = token_passwd
+        cls.token_name = token_name
+        tasks.install_master(
+            cls.master, setup_dns=True,
+            random_serial=True,
+            extra_args=(
+                '--token-name', token_name,
+                '--token-library-path', hsm_lib_path,
+                '--token-password', token_passwd
+            )
+        )
+        tasks.install_client(cls.master, cls.clients[0])
+
+    @classmethod
+    def uninstall(cls, mh):
+        check_version(cls.master)
+        super(TestHSMACMEPrune, cls).uninstall(mh)
+        delete_hsm_token([cls.master], cls.token_name)
+
+    def test_hsm_prune_cert_manual(self, issue_and_expire_acme_cert):
+        """Test to prune expired certificate by manual run"""
+        if (tasks.get_pki_version(self.master)
+           < tasks.parse_version('11.3.0')):
+            raise pytest.skip("Certificate pruning is not available")
+
+        issue_and_expire_acme_cert(
+            self.master, self.clients[0], self.acme_server)
+
+        # check that the certificate issued for the client
+        result = self.master.run_command(
+            ['ipa', 'cert-find', '--subject', self.clients[0].hostname]
+        )
+        assert f'CN={self.clients[0].hostname}' in result.stdout_text
+
+        # We moved time forward 90 days + 2 hours. Configure it to
+        # prune after an hour then run it.
+        self.master.run_command(
+            ['ipa-acme-manage', 'pruning', '--enable',
+             '--certretention=60',
+             '--certretentionunit=minute',]
+        )
+        self.master.run_command(['ipactl', 'restart'])
+        self.master.run_command(['ipa-acme-manage', 'pruning', '--run'])
+        # wait for cert to get prune
+        time.sleep(50)
+
+        # check if client cert is removed
+        result = self.master.run_command(
+            ['ipa', 'cert-find', '--subject', self.clients[0].hostname],
+            raiseonerr=False
+        )
+        assert f'CN={self.clients[0].hostname}' not in result.stdout_text
+
+    def test_hsm_prune_cert_cron(self, issue_and_expire_acme_cert):
+        """Test to prune expired certificate by cron job"""
+        if (tasks.get_pki_version(self.master)
+           < tasks.parse_version('11.3.0')):
+            raise pytest.skip("Certificate pruning is not available")
+
+        issue_and_expire_acme_cert(
+            self.master, self.clients[0], self.acme_server)
+
+        # check that the certificate issued for the client
+        result = self.master.run_command(
+            ['ipa', 'cert-find', '--subject', self.clients[0].hostname]
+        )
+        assert f'CN={self.clients[0].hostname}' in result.stdout_text
+
+        # enable pruning
+        self.master.run_command(['ipa-acme-manage', 'pruning', '--enable'])
+
+        # cron would be set to run the next minute
+        cron_minute = self.master.run_command(
+            [
+                "python3",
+                "-c",
+                (
+                    "from datetime import datetime, timedelta; "
+                    "print(int((datetime.now() + "
+                    "timedelta(minutes=5)).strftime('%M')))"
+                ),
+            ]
+        ).stdout_text.strip()
+        self.master.run_command(
+            ['ipa-acme-manage', 'pruning',
+             f'--cron={cron_minute} * * * *']
+        )
+        self.master.run_command(['ipactl', 'restart'])
+        # wait for 5 minutes to cron to execute and 20 sec for just in case
+        time.sleep(320)
+
+        # check if client cert is removed
+        result = self.master.run_command(
+            ['ipa', 'cert-find', '--subject', self.clients[0].hostname],
+            raiseonerr=False
+        )
+        assert f'CN={self.clients[0].hostname}' not in result.stdout_text
+
+
+class TestHSMVault(IntegrationTest):
+    """Validate that vault works properly"""
+
+    num_clients = 1
+
+    @classmethod
+    def install(cls, mh):
+        check_version(cls.master)
+        super(TestHSMVault, cls).install(mh)
+
+        # Enable pkiuser to read softhsm tokens
+        cls.master.run_command(['usermod', 'pkiuser', '-a', '-G', 'ods'])
+
+        token_name, token_passwd = get_hsm_token(cls.master)
+        cls.token_password = token_passwd
+        cls.token_name = token_name
+        tasks.install_master(
+            cls.master, setup_dns=True,
+            setup_kra=True,
+            extra_args=(
+                '--token-name', token_name,
+                '--token-library-path', hsm_lib_path,
+                '--token-password', token_passwd
+            )
+        )
+        tasks.install_client(cls.master, cls.clients[0])
+
+    @classmethod
+    def uninstall(cls, mh):
+        check_version(cls.master)
+        super(TestHSMVault, cls).uninstall(mh)
+
+    def test_hsm_vault_create_and_retrieve_master(self):
+        vault_name = "testvault"
+        vault_password = "password"
+        vault_data = "SSBsb3ZlIENJIHRlc3RzCg=="
+
+        # create vault on master
+        tasks.kinit_admin(self.master)
+
+        self.master.run_command([
+            "ipa", "vault-add", vault_name,
+            "--password", vault_password,
+            "--type", "symmetric",
+        ])
+
+        # archive vault
+        self.master.run_command([
+            "ipa", "vault-archive", vault_name,
+            "--password", vault_password,
+            "--data", vault_data,
+        ])
+
+        # wait after archival
+        time.sleep(45)
+
+        # retrieve vault on master
+        self.master.run_command([
+            "ipa", "vault-retrieve",
+            vault_name,
+            "--password", vault_password,
+        ])
+
+        # retrieve on client
+        tasks.kinit_admin(self.clients[0])
+        self.clients[0].run_command([
+            "ipa", "vault-retrieve",
+            vault_name,
+            "--password", vault_password,
+        ])
