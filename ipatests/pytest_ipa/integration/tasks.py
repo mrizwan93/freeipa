@@ -326,6 +326,18 @@ def install_master(host, setup_dns=True, setup_kra=False, setup_adtrust=False,
                    extra_args=(), domain_level=None, unattended=True,
                    external_ca=False, stdin_text=None, raiseonerr=True,
                    random_serial=False):
+    # skip server installation when it is already installed.
+    # used where installation is part of metadata
+    if host.transport.file_exists(paths.IPA_DEFAULT_CONF):
+        result = host.run_command(
+            ['tail', paths.IPASERVER_INSTALL_LOG],
+            raiseonerr=False
+        )
+        msg = 'The ipa-server-install command was successful'
+        kinit_admin(host)
+        if msg in result.stdout_text:
+            return
+
     if domain_level is None:
         domain_level = host.config.domain_level
     check_domain_level(domain_level)
@@ -446,6 +458,18 @@ def install_replica(master, replica, setup_ca=True, setup_dns=False,
        * IP_ADDRESS or [IP_ADDRESS, ...] - use this address as resolver
 
     """
+    # skip server installation when it is already installed.
+    # used where installation is part of metadata
+    if replica.transport.file_exists(paths.IPA_DEFAULT_CONF):
+        result = replica.run_command(
+            ['tail', paths.IPAREPLICA_INSTALL_LOG],
+            raiseonerr=False
+        )
+        msg = 'The ipa-replica-install command was successful'
+        kinit_admin(replica)
+        if msg in result.stdout_text:
+            return
+
     replica_args = list(extra_args)  # needed for client's ntp options
     if domain_level is None:
         domain_level = domainlevel(master)
