@@ -2608,6 +2608,13 @@ def wait_for_certmonger_status(host, status, request_id, timeout=120):
 
         state = result.stdout_text.strip()
         logger.info("certmonger request is in state %s", state)
+        result = host.run_command(
+            "getcert list -i %s | grep expires: | awk '{ print $2 }'" %
+            request_id
+        )
+
+        expiry = result.stdout_text.strip()
+        logger.info("certificate expires %s", expiry)
         if state in status:
             break
         time.sleep(1)
