@@ -1919,7 +1919,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestHSMInstall
         template: *ci-master-previous
-        timeout: 10800
+        timeout: 5400
         topology: *master_3repl_1client
 
   fedora-previous/test_hsm_TestHSMInstallADTrustBase:
@@ -1931,7 +1931,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestHSMInstallADTrustBase
         template: *ci-master-previous
-        timeout: 4800
+        timeout: 3600
         topology: *master_1repl
 
   fedora-previous/test_hsm_TestADTrustInstallWithDNS_KRA_ADTrust:
@@ -1943,7 +1943,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestADTrustInstallWithDNS_KRA_ADTrust
         template: *ci-master-previous
-        timeout: 10800
+        timeout: 360036003600360036003600
         topology: *master_1repl
 
   fedora-previous/test_hsm_TestHSMcertRenewal:
@@ -1955,7 +1955,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestHSMcertRenewal
         template: *ci-master-previous
-        timeout: 12000
+        timeout: 3600
         topology: *master_1repl
 
   fedora-previous/test_hsm_TestHSMCALessToExternalToSelfSignedCA:
@@ -1967,7 +1967,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestHSMCALessToExternalToSelfSignedCA
         template: *ci-master-previous
-        timeout: 12000
+        timeout: 3600
         topology: *master_1repl
 
   fedora-previous/test_hsm_TestHSMExternalToSelfSignedCA:
@@ -1979,7 +1979,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestHSMExternalToSelfSignedCA
         template: *ci-master-previous
-        timeout: 12000
+        timeout: 3600
         topology: *master_1repl
 
   fedora-previous/test_hsm_TestHSMcertFix:
@@ -1991,7 +1991,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestHSMcertFix
         template: *ci-master-previous
-        timeout: 10800
+        timeout: 3600
         topology: *master_1repl
 
   fedora-previous/test_hsm_TestHSMcertFixKRA:
@@ -2003,7 +2003,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestHSMcertFixKRA
         template: *ci-master-previous
-        timeout: 10800
+        timeout: 3600
         topology: *master_1repl
 
   fedora-previous/test_hsm_TestHSMcertFixReplica:
@@ -2015,7 +2015,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestHSMcertFixReplica
         template: *ci-master-previous
-        timeout: 10800
+        timeout: 3600
         topology: *master_1repl
 
   fedora-previous/test_hsm_TestHSMNegative:
@@ -2027,7 +2027,7 @@ jobs:
         build_url: '{fedora-previous/build_url}'
         test_suite: test_integration/test_hsm.py::TestHSMNegative
         template: *ci-master-previous
-        timeout: 3600
+        timeout: 1800
         topology: *master_1repl
 
   fedora-previous/test_hsm_TestHSMACME:
@@ -2077,4 +2077,3 @@ jobs:
         template: *ci-master-previous
         timeout: 12000
         topology: *master_1repl_1client
-

@@ -2379,7 +2379,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMInstall
         template: *ci-master-latest
-        timeout: 10800
+        timeout: 5400
         topology: *master_3repl_1client
 
   testing-fedora/test_hsm_TestHSMInstallADTrustBase:
@@ -2394,7 +2394,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMInstallADTrustBase
         template: *ci-master-latest
-        timeout: 4800
+        timeout: 3600
         topology: *master_1repl
 
   testing-fedora/test_hsm_TestADTrustInstallWithDNS_KRA_ADTrust:
@@ -2409,7 +2409,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestADTrustInstallWithDNS_KRA_ADTrust
         template: *ci-master-latest
-        timeout: 10800
+        timeout: 3600
         topology: *master_1repl
 
   testing-fedora/test_hsm_TestHSMcertRenewal:
@@ -2424,7 +2424,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMcertRenewal
         template: *ci-master-latest
-        timeout: 12000
+        timeout: 3600
         topology: *master_1repl
 
   testing-fedora/test_hsm_TestHSMCALessToExternalToSelfSignedCA:
@@ -2439,7 +2439,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMCALessToExternalToSelfSignedCA
         template: *ci-master-latest
-        timeout: 12000
+        timeout: 3600
         topology: *master_1repl
 
   testing-fedora/test_hsm_TestHSMExternalToSelfSignedCA:
@@ -2454,7 +2454,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMExternalToSelfSignedCA
         template: *ci-master-latest
-        timeout: 12000
+        timeout: 3600
         topology: *master_1repl
 
   testing-fedora/test_hsm_TestHSMcertFix:
@@ -2469,7 +2469,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMcertFix
         template: *ci-master-latest
-        timeout: 10800
+        timeout: 3600
         topology: *master_1repl
 
   testing-fedora/test_hsm_TestHSMcertFixKRA:
@@ -2484,7 +2484,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMcertFixKRA
         template: *ci-master-latest
-        timeout: 10800
+        timeout: 3600
         topology: *master_1repl
 
   testing-fedora/test_hsm_TestHSMcertFixReplica:
@@ -2499,7 +2499,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMcertFixReplica
         template: *ci-master-latest
-        timeout: 10800
+        timeout: 3600
         topology: *master_1repl
 
   testing-fedora/test_hsm_TestHSMNegative:
@@ -2514,7 +2514,7 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMNegative
         template: *ci-master-latest
-        timeout: 3600
+        timeout: 1800
         topology: *master_1repl
 
   testing-fedora/test_hsm_TestHSMACME:
@@ -2574,6 +2574,5 @@ jobs:
         enable_testing_repo: True
         test_suite: test_integration/test_hsm.py::TestHSMVault
         template: *ci-master-latest
-        timeout: 12000
+        timeout: 3600
         topology: *master_1repl_1client
-
