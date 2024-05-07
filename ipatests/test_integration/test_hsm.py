@@ -156,11 +156,7 @@ def check_version(host):
         raise pytest.skip("PKI HSM support is not available")
 
 
-class TestHSMInstall(IntegrationTest):
-
-    num_replicas = 3
-    num_clients = 1
-    topology = 'star'
+class BaseHSMTest(IntegrationTest):
 
     @classmethod
     def install(cls, mh):
@@ -193,6 +189,13 @@ class TestHSMInstall(IntegrationTest):
         check_version(cls.master)
         super(TestHSMInstall, cls).uninstall(mh)
         delete_hsm_token([cls.master] + cls.replicas, cls.token_name)
+
+
+class TestHSMInstall(BaseHSMTest):
+
+    num_replicas = 3
+    num_clients = 1
+    topology = 'star'
 
     def test_hsm_install_replica0_ca_less_install(self):
         check_version(self.master)
