@@ -315,3 +315,7 @@ class TestIDPKeycloak(IntegrationTest):
             tasks.kinit_admin(self.master)
             self.master.run_command(["rm", "-rf", backup_path])
             self.master.run_command(["ipa", "idp-del", "testidp"])
+
+    @classmethod
+    def uninstall(cls, mh):
+        pass
